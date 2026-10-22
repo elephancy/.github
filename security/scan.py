@@ -425,7 +425,11 @@ def scan(tool, repo, work):
         executable.chmod(0o700)
         if tool == "trivy":
             config, ignore = private / "config.yaml", private / "ignore"
-            config.write_text("{}\n")
+            config.write_text(json.dumps({"scan": {"maven": {"mirrors": [{
+                "source": "https://repo.maven.apache.org/maven2/",
+                "targets": ["https://maven-central.storage-download.googleapis.com/maven2/",
+                            "https://repo1.maven.org/maven2/", "https://repo.maven.apache.org/maven2/"],
+            }]}}}) + "\n")
             ignore.write_text("")
             argv = [str(executable), "fs", "--config", str(config), "--ignorefile", str(ignore),
                     "--scanners", "vuln,misconfig", "--severity", "HIGH,CRITICAL", "--exit-code", "1",
