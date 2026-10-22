@@ -1,0 +1,50 @@
+name: Security scans
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: JSON runner label array selected by the reviewed caller
+        type: string
+        default: '["ubuntu-24.04"]'
+      policy-source-sha:
+        description: Immutable elephancy/.github commit containing security/scan.py and its pins
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    # Fork PRs always use GitHub-hosted workers, never the private pool.
+    if: github.event_name != 'pull_request_target'
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '["ubuntu-24.04"]' || inputs.runner) }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # existing reviewed fleet pin
+        with:
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate immutable policy ref
+        shell: bash
+        env:
+          POLICY_SHA: ${{ inputs.policy-source-sha }}
+        run: '[[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ ]]'
+      - name: Check out reviewed scanner policy
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # existing reviewed fleet pin
+        with:
+          repository: elephancy/.github
+          ref: ${{ inputs.policy-source-sha }}
+          path: .tooling-policy
+          persist-credentials: false
+      - name: Run all scanners and gate their real outcomes
+        shell: bash
+        env:
+          SEMGREP_SEND_METRICS: 'off'
+          SEMGREP_ENABLE_VERSION_CHECK: '0'
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+          PYTHONNOUSERSITE: '1'
+        run: python3 -I -B .tooling-policy/security/scan.py "$GITHUB_WORKSPACE/source"
