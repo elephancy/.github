@@ -1,7 +1,7 @@
 {
   "security": {
     "workflow": "checks.yml",
-    "policy": "elephancy/.github@87861b91a9c4e27f0fa977bf82006853f5652cfd",
+    "policy": "elephancy/.github@bd2b535771fb0e113c14f7714c73d4000323bcc5",
     "tools": [
       "semgrep-ce",
       "trivy",
