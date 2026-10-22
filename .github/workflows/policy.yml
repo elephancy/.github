@@ -21,4 +21,4 @@ jobs:
           python-version: '3.12'
       - name: Verify scanner error handling, privacy and independent outcomes
         working-directory: security
-        run: python -B -m unittest -v test_scan.PolicyTests
+        run: python -B -m unittest -v test_scan.PolicyTests test_exceptions.ExceptionTests
