@@ -175,7 +175,12 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(seconds, 240)
             self.assertFalse(set(argv) & {"--offline-scan", "--skip-db-update", "--skip-java-db-update",
                 "--skip-check-update", "--ignore-unfixed"})
-            self.assertEqual(Path(argv[argv.index("--config") + 1]).read_text(), "{}\n")
+            self.assertEqual(json.loads(Path(argv[argv.index("--config") + 1]).read_text()), {
+                "scan": {"maven": {"mirrors": [{
+                    "source": "https://repo.maven.apache.org/maven2/",
+                    "targets": ["https://maven-central.storage-download.googleapis.com/maven2/",
+                                "https://repo1.maven.org/maven2/", "https://repo.maven.apache.org/maven2/"],
+                }]}}})
             self.assertEqual(Path(argv[argv.index("--ignorefile") + 1]).read_text(), "")
 
     def test_trivy_503_without_a_report_is_not_clean(self):
