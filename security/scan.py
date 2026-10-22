@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import signal
 import subprocess
@@ -29,8 +30,9 @@ REDIRECT_HOSTS = DOWNLOAD_HOSTS | {"release-assets.githubusercontent.com", "obje
 
 
 class ScannerFailure(Exception):
-    def __init__(self, phase, category, exit_code=None):
+    def __init__(self, phase, category, exit_code=None, diagnostics=None):
         self.phase, self.category, self.exit_code = phase, category, exit_code
+        self.diagnostics = diagnostics
 
 
 def phase(name, function, *args):
@@ -135,15 +137,57 @@ def safe_text(value, maximum=240):
     return value
 
 
+def report_list(mapping, name):
+    # Trivy serializes optional Go slices as null as well as omitting them.
+    value = mapping.get(name)
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise ValueError("invalid report list")
+    return value
+
+
+def rate_limit_delay(log):
+    """Recognize a transient upstream response without publishing its body."""
+    text = log.read_text(errors="replace").lower()
+    if not re.search(r"\b429\b", text) or "too many requests" not in text:
+        return False, None
+    if "retry-after" not in text:
+        return True, 5
+    delay = re.search(r"retry-after[\s\"':=]+(\d+)\b", text)
+    # If the logged header is not numeric, decline to retry early.
+    return True, int(delay.group(1)) if delay else None
+
+
 def findings(tool, report):
+    if not report.is_file():
+        raise ScannerFailure("report", "report-missing")
     if report.stat().st_size > REPORT_CAP:
         raise ValueError("report bound")
     data = json.loads(report.read_bytes())
     if tool == "semgrep":
-        if data.get("errors"):
-            raise ValueError("incomplete semgrep scan")
-        return [{"path": safe_text(x.get("path")), "rule": safe_text(x.get("check_id")),
-                 "line": x.get("start", {}).get("line")} for x in data["results"]]
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            raise ValueError("invalid semgrep report")
+        items = [{"path": safe_text(x.get("path")), "rule": safe_text(x.get("check_id")),
+                  "line": x.get("start", {}).get("line")} for x in data["results"]]
+        errors = report_list(data, "errors")
+        if errors:
+            issues = []
+            for error in errors[:20]:
+                kind = error.get("type")
+                if isinstance(kind, list):
+                    kind = kind[0] if kind else None
+                issues.append({"type": safe_text(kind, 64),
+                               "code": error.get("code") if type(error.get("code")) is int else None,
+                               "path": safe_text(error.get("path"))})
+            # A partial scan is still a failure. Retain actionable findings and
+            # issue locations without publishing source lines or error messages.
+            raise ScannerFailure("report", "incomplete-scan", diagnostics={
+                "count": len(items), "findings": items[:50],
+                "additional_findings": max(0, len(items) - 50),
+                "scan_issue_count": len(errors), "scan_issues": issues,
+                "additional_scan_issues": max(0, len(errors) - 20)})
+        return items
     if tool == "gitleaks":
         return [{"path": safe_text(x.get("File")), "rule": safe_text(x.get("RuleID")),
                  "line": x.get("StartLine")} for x in data]
@@ -151,8 +195,8 @@ def findings(tool, report):
             or data["SchemaVersion"] != 2 or data.get("ArtifactType") not in ("filesystem", "repository")):
         raise ValueError("invalid trivy report")
     result = []
-    for target in data.get("Results", []):
-        for item in target.get("Vulnerabilities", []) + target.get("Misconfigurations", []):
+    for target in report_list(data, "Results"):
+        for item in report_list(target, "Vulnerabilities") + report_list(target, "Misconfigurations"):
             result.append({"path": safe_text(target.get("Target")),
                            "rule": safe_text(item.get("VulnerabilityID", item.get("ID"))),
                            "severity": safe_text(item.get("Severity"))})
@@ -181,7 +225,7 @@ def scan(tool, repo, work):
               "semgrep-rules-" + spec["source_commit"] + "/")
         argv = [str(private / "venv/bin/semgrep"), "scan", "--oss-only", "--metrics=off",
                 "--disable-version-check", "--strict", "--error", "--jobs=2", "--max-memory=1024",
-                "--timeout=5", "--config", str(rules), "--json", "--output", str(report)]
+                "--timeout=20", "--config", str(rules), "--json", "--output", str(report)]
         for exclude in EXCLUDES:
             argv += ["--exclude", exclude]
         argv += ["."]
@@ -213,9 +257,33 @@ def scan(tool, repo, work):
                     "--log-level", "error", "--report-format", "json", "--report-path", str(report),
                     "--exit-code", "1", "--timeout", "120", "--log-opts=--all", "."]
             seconds = 130
+    started = time.monotonic()
     rc = phase("scan", command, argv, repo, log, seconds)
-    items = phase("report", findings, tool, report)
-    if rc not in (0, 1) or (rc == 0 and items) or (rc == 1 and not items):
+    retried = False
+    if tool == "trivy" and not report.is_file():
+        limited, delay = rate_limit_delay(log)
+        remaining = seconds - (time.monotonic() - started)
+        if limited and delay is not None and 0 <= delay <= 30 and remaining > delay + 5:
+            time.sleep(delay)
+            retried = True
+            try:
+                rc = phase("scan", command, argv, repo, log, seconds - (time.monotonic() - started))
+            except ScannerFailure as failure:
+                failure.diagnostics = {"first_failure_http_status": 429, "retry_attempts": 1}
+                raise
+        if limited and not report.is_file():
+            raise ScannerFailure("scan", "upstream-rate-limit", rc, diagnostics={
+                "http_status": 429, "retry_attempts": int(retried)})
+    if rc not in (0, 1) and not report.is_file():
+        raise ScannerFailure("scan", "scanner-failed", rc)
+    try:
+        items = phase("report", findings, tool, report)
+    except ScannerFailure as failure:
+        failure.exit_code = rc
+        raise
+    if rc not in (0, 1):
+        raise ScannerFailure("scan", "scanner-failed", rc)
+    if (rc == 0 and items) or (rc == 1 and not items):
         raise ScannerFailure("report", "exit-report-disagreement", rc)
     return {"tool": tool, "status": "findings" if items else "clean", "count": len(items),
             "findings": items[:50], "additional_findings": max(0, len(items) - 50)}
@@ -242,6 +310,8 @@ def main():
                 result = {"tool": tool, "status": "error", "phase": failure.phase,
                           "category": failure.category, "exit_code": failure.exit_code,
                           "private_output_withheld": True}
+                if failure.diagnostics is not None:
+                    result.update(failure.diagnostics)
             except Exception:
                 result = {"tool": tool, "status": "error", "phase": "internal",
                           "category": "unexpected-error", "private_output_withheld": True}
