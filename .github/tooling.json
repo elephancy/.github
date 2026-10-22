@@ -12,8 +12,8 @@
   },
   "native_secret_scanning": "enabled-with-push-protection",
   "codecov": {
-    "status": "coverage-applicability-recorded-in-rollout",
-    "upload_enablement": "requires-connected-account-and-verified-upload-allowance"
+    "status": "not-configured",
+    "reason": "No compatible coverage-producing test lane configured in this rollout"
   },
   "lighthouse_ci": "not-configured-local-browser-fixture-required",
   "gameci": "not-a-unity-project"

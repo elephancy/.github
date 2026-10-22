@@ -12,6 +12,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
@@ -23,6 +24,8 @@ DOWNLOAD_CAP = 100 * 1024**2
 REPORT_CAP = 16 * 1024**2
 MEMBER_CAP = 256 * 1024**2
 EXCLUDES = ["node_modules", ".venv", "venv", "Library", "Temp", "obj", ".git"]
+DOWNLOAD_HOSTS = frozenset({"github.com", "codeload.github.com"})
+REDIRECT_HOSTS = DOWNLOAD_HOSTS | {"release-assets.githubusercontent.com", "objects.githubusercontent.com"}
 
 
 class ScannerFailure(Exception):
@@ -41,8 +44,25 @@ def phase(name, function, *args):
         raise ScannerFailure(name, "operation-failed") from None
 
 
+def checked_url(url, redirect=False):
+    parsed = urllib.parse.urlsplit(url)
+    allowed = REDIRECT_HOSTS if redirect else DOWNLOAD_HOSTS
+    if (parsed.scheme != "https" or parsed.hostname not in allowed or parsed.port not in (None, 443)
+            or parsed.username is not None or parsed.password is not None or parsed.fragment
+            or (not redirect and parsed.query)):
+        raise ValueError("download URL")
+    return url
+
+
+class DownloadRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return super().redirect_request(req, fp, code, msg, headers, checked_url(newurl, redirect=True))
+
+
 def download(url, expected, maximum=DOWNLOAD_CAP):
-    with urllib.request.urlopen(url, timeout=45) as response:
+    # HTTPS/hosts are closed above, including redirects; immutable bytes must match the reviewed SHA256.
+    opener = urllib.request.build_opener(DownloadRedirect())
+    with opener.open(checked_url(url), timeout=45) as response:
         data = response.read(maximum + 1)
     if len(data) > maximum or hashlib.sha256(data).hexdigest() != expected:
         raise ValueError("download integrity")

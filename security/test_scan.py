@@ -16,6 +16,20 @@ spec.loader.exec_module(scan)
 
 
 class PolicyTests(unittest.TestCase):
+    def test_download_url_scope_and_redirects(self):
+        self.assertEqual(scan.checked_url("https://github.com/org/repo/asset"), "https://github.com/org/repo/asset")
+        self.assertEqual(scan.checked_url("https://codeload.github.com/org/repo/tar.gz/commit"),
+                         "https://codeload.github.com/org/repo/tar.gz/commit")
+        for url in ("file:///etc/passwd", "http://github.com/asset", "https://github.com.evil.invalid/asset",
+                    "https://user:password@github.com/asset", "https://github.com:8443/asset",
+                    "https://github.com/asset#fragment", "https://github.com/asset?query=unexpected",
+                    "https://raw.githubusercontent.com/asset", "https://127.0.0.1/asset"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                scan.checked_url(url)
+        scan.checked_url("https://release-assets.githubusercontent.com/asset?signed=value", redirect=True)
+        with self.assertRaises(ValueError):
+            scan.checked_url("https://unapproved.invalid/asset", redirect=True)
+
     def test_all_tools_run_after_first_failure_and_final_gate_fails(self):
         with tempfile.TemporaryDirectory() as d:
             repo = Path(d)
@@ -121,11 +135,51 @@ class RealScannerTests(unittest.TestCase):
         result = scan.scan("semgrep", self.repo, self.work)
         self.assertEqual(result["status"], "findings")
         self.assertGreater(result["count"], 0)
+        # The URL validation fix is accepted by the same full pinned audit pack.
+        audit = self.work / "downloader-audit"
+        audit.mkdir()
+        (audit / "scan.py").write_bytes(Path(scan.__file__).read_bytes())
+        private = self.work / "semgrep"
+        report = private / "downloader-report.json"
+        rc = scan.command([str(private / "venv/bin/semgrep"), "scan", "--oss-only", "--metrics=off",
+                           "--disable-version-check", "--strict", "--error", "--jobs=2", "--max-memory=1024",
+                           "--config", str(private / "rules"), "--json", "--output", str(report), "."],
+                          audit, private / "log", 90)
+        self.assertEqual(rc, 0)
+        self.assertEqual(scan.findings("semgrep", report), [])
+        self.assertEqual(len(json.loads(report.read_bytes())["paths"]["scanned"]), 1)
 
     def test_gitleaks_pinned_binary_full_history_and_redaction(self):
         result = scan.scan("gitleaks", self.repo, self.work)
         self.assertEqual(result["status"], "findings")
         self.assertNotIn(self.fake, json.dumps(result))
+
+    def test_gitleaks_exact_fingerprint_only_and_default_ignore_lookup(self):
+        private = self.work / "ignore-fixture"
+        private.mkdir()
+        scan.extract_selected(scan.download(
+            f"https://github.com/gitleaks/gitleaks/releases/download/v{scan.GITLEAKS_VERSION}/gitleaks_{scan.GITLEAKS_VERSION}_linux_x64.tar.gz",
+            scan.GITLEAKS_SHA), {"gitleaks": None}, private)
+        binary = private / "gitleaks"
+        binary.chmod(0o700)
+        report, config = private / "report.json", private / "config.toml"
+        config.write_text("[extend]\nuseDefault = true\n")
+        argv = [str(binary), "git", "--config", str(config), "--redact=100", "--no-banner",
+                "--report-format", "json", "--report-path", str(report), "--log-opts=--all", "."]
+        self.assertEqual(scan.command(argv, self.repo, private / "log", 30), 1)
+        original = json.loads(report.read_bytes())
+        self.addCleanup((self.repo / ".gitleaksignore").unlink, missing_ok=True)
+        (self.repo / ".gitleaksignore").write_text("\n".join(x["Fingerprint"] for x in original) + "\n")
+        self.assertEqual(scan.command(argv, self.repo, private / "log", 30), 0)
+        self.assertEqual(json.loads(report.read_bytes()), [])
+        # A new fake credential in the same file is a new fingerprint and still fails.
+        later_fake = "ghp_" + self.fake[4:][::-1]
+        (self.repo / "secret.txt").write_text("github_token=" + self.fake + "\nanother_token=" + later_fake + "\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "secret.txt"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "move fake fixture"], check=True)
+        self.assertEqual(scan.command(argv, self.repo, private / "log", 30), 1)
+        self.assertGreater(len(json.loads(report.read_bytes())), 0)
+        (self.repo / ".gitleaksignore").unlink()
 
     def test_trivy_pinned_binary_real_misconfig(self):
         private = self.work / "trivy-fixture"
