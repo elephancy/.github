@@ -303,6 +303,27 @@ def rate_limit_delay(log):
     return True, int(delay.group(1)) if delay else None
 
 
+def trivy_log_presence(log):
+    """Fixed presence indicators only; they do not identify a causal endpoint."""
+    try:
+        text = log.read_text(errors="replace").lower()
+    except OSError:
+        text = ""
+    return {
+        "registry_presence": {
+            "gcr": bool(re.search(r"(?<![a-z0-9_.-])mirror\.gcr\.io(?![a-z0-9_.-])", text)),
+            "ghcr": bool(re.search(r"(?<![a-z0-9_.-])ghcr\.io(?![a-z0-9_.-])", text)),
+            "ecr": bool(re.search(r"(?<![a-z0-9_.-])public\.ecr\.aws(?![a-z0-9_.-])", text)),
+        },
+        "db_update_phase_presence": {
+            "vulnerability_db": bool(re.search(
+                r"\b(?:failed to download vulnerability db|need to update db|updating vulnerability database)\b", text)),
+            "java_db": bool(re.search(
+                r"\b(?:failed to download java db|need to update java db|downloading java db)\b", text)),
+        },
+    }
+
+
 def findings(tool, report):
     if not report.is_file():
         raise ScannerFailure("report", "report-missing")
@@ -409,6 +430,12 @@ def scan(tool, repo, work):
             argv = [str(executable), "fs", "--config", str(config), "--ignorefile", str(ignore),
                     "--scanners", "vuln,misconfig", "--severity", "HIGH,CRITICAL", "--exit-code", "1",
                     "--parallel", "2", "--timeout", "210s", "--skip-version-check", "--quiet",
+                    "--db-repository", "mirror.gcr.io/aquasec/trivy-db:2",
+                    "--db-repository", "ghcr.io/aquasecurity/trivy-db:2",
+                    "--db-repository", "public.ecr.aws/aquasecurity/trivy-db:2",
+                    "--java-db-repository", "mirror.gcr.io/aquasec/trivy-java-db:1",
+                    "--java-db-repository", "ghcr.io/aquasecurity/trivy-java-db:1",
+                    "--java-db-repository", "public.ecr.aws/aquasecurity/trivy-java-db:1",
                     "--cache-dir", str(private / "cache"), "--format", "json", "--output", str(report)]
             for exclude in EXCLUDES:
                 argv += ["--skip-dirs", exclude]
@@ -475,6 +502,8 @@ def main():
                           "private_output_withheld": True}
                 if failure.diagnostics is not None:
                     result.update(failure.diagnostics)
+                if tool == "trivy":
+                    result.update(trivy_log_presence(work / tool / "log"))
             except Exception:
                 result = {"tool": tool, "status": "error", "phase": "internal",
                           "category": "unexpected-error", "private_output_withheld": True}

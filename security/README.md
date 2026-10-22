@@ -64,6 +64,8 @@ The policy workflow runs both the existing policy tests and the exception matche
 python -B -m unittest -v test_scan.PolicyTests test_exceptions.ExceptionTests
 ```
 
-The 33 Linux tests cover real symlinks and hardlinks, replacement during reads, exact identity mismatches, duplicate findings, stale entries, malformed schemas and independent scanner execution. Real pinned Trivy and Semgrep checks verify that a reviewed finding can be accepted while changed bytes, a new finding and a stale entry still fail.
+The 37 Linux tests cover real symlinks and hardlinks, replacement during reads, exact identity mismatches, duplicate findings, stale entries, malformed schemas and independent scanner execution. Real pinned Trivy and Semgrep checks verify that a reviewed finding can be accepted while changed bytes, a new finding and a stale entry still fail.
 
 Repository-specific exception manifests belong in their application repositories. Review the source, rationale and negative tests through the normal pull request process. Tool installation, downloads, timeouts, retries, redaction, existing Gitleaks behavior and scanner rule selection remain unchanged.
+
+Trivy keeps its default GCR then GHCR order for both databases, with Aqua's official public ECR repository added last as an availability fallback. Database updates, deadlines and HIGH/CRITICAL gates remain enabled. On a Trivy failure, the summary may include fixed registry and database-update phrase presence booleans; these reveal no raw URLs or log text and do not establish which endpoint caused the failure.
