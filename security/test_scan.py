@@ -60,8 +60,86 @@ class PolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "report"
             p.write_text('{"results":[],"errors":[{"message":"SECRET"}]}')
-            with self.assertRaises(ValueError):
+            with self.assertRaises(scan.ScannerFailure) as caught:
                 scan.findings("semgrep", p)
+            self.assertEqual(caught.exception.category, "incomplete-scan")
+
+    def test_partial_semgrep_findings_and_safe_issue_locations_survive(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "report"
+            p.write_text(json.dumps({"results": [{
+                "path": "source.py", "check_id": "unsafe-call", "start": {"line": 2},
+                "extra": {"lines": "RAW_SECRET_SOURCE"}}], "errors": [{
+                "code": 3, "type": ["PartialParsing", [{"source": "RAW_SOURCE"}]],
+                "path": "parse.tsx", "message": "RAW_SECRET_MESSAGE"}]}))
+            with self.assertRaises(scan.ScannerFailure) as caught:
+                scan.findings("semgrep", p)
+            self.assertEqual(caught.exception.category, "incomplete-scan")
+            diagnostic = caught.exception.diagnostics
+            self.assertEqual(diagnostic["count"], 1)
+            self.assertEqual(diagnostic["findings"], [{"path": "source.py", "rule": "unsafe-call", "line": 2}])
+            self.assertEqual(diagnostic["scan_issues"], [{"type": "PartialParsing", "code": 3, "path": "parse.tsx"}])
+            self.assertNotIn("RAW_", json.dumps(diagnostic))
+
+    def test_scanner_exit_error_is_not_hidden_by_missing_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo, work = Path(d) / "repo", Path(d) / "work"
+            repo.mkdir()
+            work.mkdir()
+            archive = io.BytesIO()
+            with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+                member = tarfile.TarInfo("gitleaks")
+                member.size = 4
+                tar.addfile(member, io.BytesIO(b"fake"))
+            with patch.object(scan, "download", return_value=archive.getvalue()), \
+                    patch.object(scan, "command", return_value=2), self.assertRaises(scan.ScannerFailure) as caught:
+                scan.scan("gitleaks", repo, work)
+            self.assertEqual((caught.exception.phase, caught.exception.category, caught.exception.exit_code),
+                             ("scan", "scanner-failed", 2))
+
+    def test_missing_report_fails_with_specific_category(self):
+        with tempfile.TemporaryDirectory() as d, self.assertRaises(scan.ScannerFailure) as caught:
+            scan.findings("trivy", Path(d) / "absent")
+        self.assertEqual(caught.exception.category, "report-missing")
+
+    def test_rate_limit_backoff_respects_headers_and_ignores_other_errors(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "log"
+            for text, expected in (
+                ("HTTP429 Too Many Requests", (False, None)),
+                ("429 Too Many Requests", (True, 5)),
+                ("429 Too Many Requests Retry-After: 12", (True, 12)),
+                ("429 Too Many Requests Retry-After: 120", (True, 120)),
+                ("429 Too Many Requests Retry-After: Wed, 21 Oct 2026", (True, None)),
+                ("403 Forbidden RAW_SECRET_BODY", (False, None)),
+            ):
+                log.write_text(text)
+                with self.subTest(expected=expected):
+                    self.assertEqual(scan.rate_limit_delay(log), expected)
+
+    def test_trivy_retry_is_bounded_and_original_rate_limit_is_retained(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo, work = Path(d) / "repo", Path(d) / "work"
+            repo.mkdir()
+            work.mkdir()
+            archive = io.BytesIO()
+            with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+                member = tarfile.TarInfo("trivy")
+                member.size = 4
+                tar.addfile(member, io.BytesIO(b"fake"))
+            calls = []
+            def failure(argv, cwd, log, seconds):
+                calls.append(seconds)
+                log.write_text("429 Too Many Requests Retry-After: 0 RAW_SECRET_RESPONSE")
+                return 1
+            with patch.object(scan, "download", return_value=archive.getvalue()), \
+                    patch.object(scan, "command", failure), self.assertRaises(scan.ScannerFailure) as caught:
+                scan.scan("trivy", repo, work)
+            self.assertEqual(len(calls), 2)
+            self.assertLessEqual(calls[1], calls[0])
+            self.assertEqual(caught.exception.category, "upstream-rate-limit")
+            self.assertEqual(caught.exception.diagnostics, {"http_status": 429, "retry_attempts": 1})
+            self.assertNotIn("RAW_", json.dumps(caught.exception.diagnostics))
 
     def test_empty_or_wrong_kind_trivy_json_is_not_clean(self):
         with tempfile.TemporaryDirectory() as d:
@@ -69,6 +147,21 @@ class PolicyTests(unittest.TestCase):
             for value in ({}, {"SchemaVersion": 2, "ArtifactType": "container_image"}):
                 p.write_text(json.dumps(value))
                 with self.assertRaises(ValueError):
+                    scan.findings("trivy", p)
+
+    def test_trivy_null_optional_lists_and_malformed_lists(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "report"
+            base = {"SchemaVersion": 2, "ArtifactType": "repository"}
+            p.write_text(json.dumps(base | {"Results": [{
+                "Target": "package-lock.json", "Vulnerabilities": None,
+                "Misconfigurations": [{"ID": "AVD-TEST", "Severity": "HIGH"}],
+            }]}))
+            self.assertEqual(scan.findings("trivy", p), [{
+                "path": "package-lock.json", "rule": "AVD-TEST", "severity": "HIGH"}])
+            for bad in ({}, "invalid", 5, ["invalid"]):
+                p.write_text(json.dumps(base | {"Results": [{"Vulnerabilities": bad}]}))
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
                     scan.findings("trivy", p)
 
     def test_tar_link_is_never_extracted(self):
