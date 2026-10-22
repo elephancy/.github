@@ -1,0 +1,8 @@
+# Only the six published SHA256 rule-file digests flagged in the first central commit.
+# These are public integrity metadata, not credentials. No path/rule/hash-wide suppression.
+87861b91a9c4e27f0fa977bf82006853f5652cfd:security/rules.json:generic-api-key:354
+87861b91a9c4e27f0fa977bf82006853f5652cfd:security/rules.json:generic-api-key:367
+87861b91a9c4e27f0fa977bf82006853f5652cfd:security/rules.json:generic-api-key:382
+87861b91a9c4e27f0fa977bf82006853f5652cfd:security/rules.json:generic-api-key:411
+87861b91a9c4e27f0fa977bf82006853f5652cfd:security/rules.json:generic-api-key:428
+87861b91a9c4e27f0fa977bf82006853f5652cfd:security/rules.json:generic-api-key:437

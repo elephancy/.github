@@ -1,0 +1,20 @@
+{
+  "security": {
+    "workflow": "checks.yml",
+    "policy": "elephancy/.github@bd2b535771fb0e113c14f7714c73d4000323bcc5",
+    "tools": [
+      "semgrep-ce",
+      "trivy",
+      "gitleaks-cli"
+    ],
+    "runner": "github-hosted",
+    "fork_pull_requests": "github-hosted-read-only"
+  },
+  "native_secret_scanning": "enabled-with-push-protection",
+  "codecov": {
+    "status": "not-configured",
+    "reason": "No compatible coverage-producing test lane configured in this rollout"
+  },
+  "lighthouse_ci": "not-configured-local-browser-fixture-required",
+  "gameci": "not-a-unity-project"
+}
