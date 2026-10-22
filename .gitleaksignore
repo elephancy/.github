@@ -6,3 +6,10 @@
 87861b91a9c4e27f0fa977bf82006853f5652cfd:security/rules.json:generic-api-key:411
 87861b91a9c4e27f0fa977bf82006853f5652cfd:security/rules.json:generic-api-key:428
 87861b91a9c4e27f0fa977bf82006853f5652cfd:security/rules.json:generic-api-key:437
+# The same six reviewed public integrity digests in the normal squash merge.
+57cdda1aad5b5d7789c55d784581dd0cb4e8e02d:security/rules.json:generic-api-key:354
+57cdda1aad5b5d7789c55d784581dd0cb4e8e02d:security/rules.json:generic-api-key:367
+57cdda1aad5b5d7789c55d784581dd0cb4e8e02d:security/rules.json:generic-api-key:382
+57cdda1aad5b5d7789c55d784581dd0cb4e8e02d:security/rules.json:generic-api-key:411
+57cdda1aad5b5d7789c55d784581dd0cb4e8e02d:security/rules.json:generic-api-key:428
+57cdda1aad5b5d7789c55d784581dd0cb4e8e02d:security/rules.json:generic-api-key:437
