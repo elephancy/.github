@@ -141,6 +141,107 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(caught.exception.diagnostics, {"http_status": 429, "retry_attempts": 1})
             self.assertNotIn("RAW_", json.dumps(caught.exception.diagnostics))
 
+    def test_trivy_official_db_fallback_order_and_existing_bounds(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo, work = Path(d) / "repo", Path(d) / "work"
+            repo.mkdir()
+            work.mkdir()
+            archive = io.BytesIO()
+            with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+                member = tarfile.TarInfo("trivy")
+                member.size = 4
+                tar.addfile(member, io.BytesIO(b"fake"))
+            captured = []
+            def success(argv, cwd, log, seconds):
+                captured.append((argv, seconds))
+                Path(argv[argv.index("--output") + 1]).write_text(json.dumps({
+                    "SchemaVersion": 2, "ArtifactType": "repository", "Results": []}))
+                return 0
+            with patch.object(scan, "download", return_value=archive.getvalue()), \
+                    patch.object(scan, "command", success):
+                self.assertEqual(scan.scan("trivy", repo, work)["status"], "clean")
+            self.assertEqual(len(captured), 1)
+            argv, seconds = captured[0]
+            for flag, expected in (
+                ("--db-repository", ["mirror.gcr.io/aquasec/trivy-db:2",
+                    "ghcr.io/aquasecurity/trivy-db:2", "public.ecr.aws/aquasecurity/trivy-db:2"]),
+                ("--java-db-repository", ["mirror.gcr.io/aquasec/trivy-java-db:1",
+                    "ghcr.io/aquasecurity/trivy-java-db:1", "public.ecr.aws/aquasecurity/trivy-java-db:1"]),
+            ):
+                self.assertEqual([argv[i + 1] for i, value in enumerate(argv) if value == flag], expected)
+            for flag, expected in (("--timeout", "210s"), ("--parallel", "2"),
+                    ("--scanners", "vuln,misconfig"), ("--severity", "HIGH,CRITICAL"), ("--exit-code", "1")):
+                self.assertEqual(argv[argv.index(flag) + 1], expected)
+            self.assertEqual(seconds, 240)
+            self.assertFalse(set(argv) & {"--offline-scan", "--skip-db-update", "--skip-java-db-update",
+                "--skip-check-update", "--ignore-unfixed"})
+            self.assertEqual(Path(argv[argv.index("--config") + 1]).read_text(), "{}\n")
+            self.assertEqual(Path(argv[argv.index("--ignorefile") + 1]).read_text(), "")
+
+    def test_trivy_503_without_a_report_is_not_clean(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo, work = Path(d) / "repo", Path(d) / "work"
+            repo.mkdir()
+            work.mkdir()
+            archive = io.BytesIO()
+            with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+                member = tarfile.TarInfo("trivy")
+                member.size = 4
+                tar.addfile(member, io.BytesIO(b"fake"))
+            def unavailable(argv, cwd, log, seconds):
+                log.write_text("503 Service Unavailable PRIVATE_RESPONSE")
+                return 1
+            with patch.object(scan, "download", return_value=archive.getvalue()), \
+                    patch.object(scan, "command", unavailable), self.assertRaises(scan.ScannerFailure):
+                scan.scan("trivy", repo, work)
+
+    def test_trivy_failure_presence_is_finite_and_does_not_claim_causality(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "log"
+            log.write_text("Failed to download vulnerability DB from https://mirror.gcr.io/v2/private?token=PRIVATE "
+                "then ghcr.io/aquasecurity/trivy-db and public.ecr.aws/aquasecurity/trivy-db "
+                "PRIVATE_BODY /private/workspace/source.js")
+            self.assertEqual(scan.trivy_log_presence(log), {
+                "registry_presence": {"gcr": True, "ghcr": True, "ecr": True},
+                "db_update_phase_presence": {"vulnerability_db": True, "java_db": False}})
+            self.assertNotIn("PRIVATE", json.dumps(scan.trivy_log_presence(log)))
+            log.write_text("429 Too Many Requests https://mirror.gcr.io.evil.invalid "
+                "ghcr.io.evil.invalid evilpublic.ecr.aws Failed to download Java DB")
+            self.assertEqual(scan.trivy_log_presence(log), {
+                "registry_presence": {"gcr": False, "ghcr": False, "ecr": False},
+                "db_update_phase_presence": {"vulnerability_db": False, "java_db": True}})
+            log.unlink()
+            self.assertEqual(scan.trivy_log_presence(log), {
+                "registry_presence": {"gcr": False, "ghcr": False, "ecr": False},
+                "db_update_phase_presence": {"vulnerability_db": False, "java_db": False}})
+
+    def test_trivy_failure_summary_keeps_presence_only_and_other_tools_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            (repo / ".git").mkdir()
+            calls = []
+            def controlled(tool, repo, work):
+                calls.append(tool)
+                if tool == "trivy":
+                    private = work / tool
+                    private.mkdir()
+                    (private / "log").write_text("Failed to download Java DB: "
+                        "https://public.ecr.aws/v2/private?token=PRIVATE 429 Too Many Requests PRIVATE_BODY")
+                    raise scan.ScannerFailure("scan", "upstream-rate-limit", 1,
+                        diagnostics={"http_status": 429, "retry_attempts": 0})
+                return {"tool": tool, "status": "clean"}
+            output = io.StringIO()
+            with patch.object(scan, "scan", controlled), patch.object(sys, "argv", ["scan.py", str(repo)]), \
+                    patch("sys.stdout", output):
+                self.assertEqual(scan.main(), 1)
+            self.assertEqual(calls, ["semgrep", "trivy", "gitleaks"])
+            result = json.loads(output.getvalue().splitlines()[1])
+            self.assertEqual(result["registry_presence"], {"gcr": False, "ghcr": False, "ecr": True})
+            self.assertEqual(result["db_update_phase_presence"], {"vulnerability_db": False, "java_db": True})
+            self.assertEqual((result["http_status"], result["retry_attempts"]), (429, 0))
+            for private in ("PRIVATE", "https://", "/v2/", "token="):
+                self.assertNotIn(private, output.getvalue())
+
     def test_empty_or_wrong_kind_trivy_json_is_not_clean(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "report"
