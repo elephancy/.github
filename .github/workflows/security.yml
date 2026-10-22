@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out source without persisted credentials
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # existing reviewed fleet pin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # existing reviewed fleet pin
         with:
           path: source
           fetch-depth: 0
@@ -34,7 +34,7 @@ jobs:
           POLICY_SHA: ${{ inputs.policy-source-sha }}
         run: '[[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ ]]'
       - name: Check out reviewed scanner policy
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # existing reviewed fleet pin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # existing reviewed fleet pin
         with:
           repository: elephancy/.github
           ref: ${{ inputs.policy-source-sha }}
